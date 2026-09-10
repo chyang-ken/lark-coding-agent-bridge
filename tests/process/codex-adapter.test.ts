@@ -179,6 +179,7 @@ describe('CodexAdapter process contract', () => {
         images: [image],
       }),
     );
+    expect(record.stdin).toBe('continue');
   });
 
   it('lets per-run policy sandbox override the adapter default', async () => {

@@ -113,6 +113,24 @@ describe('CodexAdapter system prompt wiring', () => {
     const stdin = await readAll(child.stdin);
     expect(stdin).toBe(prefixBridgeSystemPrompt('hi', undefined));
   });
+
+  it('sends only the dynamic prompt when resuming an existing Codex thread', async () => {
+    const child = fakeChild();
+    spawnMock.spawnProcess.mockReturnValue(child);
+    const adapter = codexAdapter();
+    adapter.setBotIdentity({ openId: 'ou_bot_self', name: 'Bridge' });
+
+    adapter.run({
+      runId: 'r1',
+      prompt: '<bridge_context>dynamic</bridge_context>\n\nfollow up',
+      cwd: '/tmp',
+      threadId: 'thread-existing',
+    });
+
+    const stdin = await readAll(child.stdin);
+    expect(stdin).toBe('<bridge_context>dynamic</bridge_context>\n\nfollow up');
+    expect(stdin).not.toContain('lark-channel-bridge 运行约定');
+  });
 });
 
 async function readAll(stream: PassThrough): Promise<string> {
