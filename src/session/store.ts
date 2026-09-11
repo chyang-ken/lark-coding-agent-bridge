@@ -14,9 +14,34 @@ export interface SessionEntry {
    * scope, undefined = follow global default. Session resets preserve this
    * scope preference while removing the resumable session id/cwd. */
   idleTimeoutMinutes?: number;
+  /** Message IDs already injected as inherited Feishu context for this scope. */
+  contextMessageIds?: {
+    chat?: string[];
+    topic?: string[];
+  };
 }
 
 type SessionMap = Record<string, SessionEntry>;
+
+const MAX_CONTEXT_MESSAGE_IDS = 400;
+
+function normalizeContextMessageIds(
+  input: SessionEntry['contextMessageIds'],
+): SessionEntry['contextMessageIds'] | undefined {
+  if (!input || typeof input !== 'object') return undefined;
+  const normalize = (value: unknown): string[] =>
+    Array.isArray(value)
+      ? [...new Set(value.filter((id): id is string => typeof id === 'string' && id.length > 0))]
+          .slice(-MAX_CONTEXT_MESSAGE_IDS)
+      : [];
+  const chat = normalize(input.chat);
+  const topic = normalize(input.topic);
+  if (chat.length === 0 && topic.length === 0) return undefined;
+  return {
+    ...(chat.length > 0 ? { chat } : {}),
+    ...(topic.length > 0 ? { topic } : {}),
+  };
+}
 
 export class SessionStore {
   private data: SessionMap = {};
@@ -43,13 +68,15 @@ export class SessionStore {
         const cwd = typeof entry.cwd === 'string' ? entry.cwd : undefined;
         const idleTimeoutMinutes =
           typeof entry.idleTimeoutMinutes === 'number' ? entry.idleTimeoutMinutes : undefined;
+        const contextMessageIds = normalizeContextMessageIds(entry.contextMessageIds);
         const hasSession = sessionId !== undefined && cwd !== undefined;
-        if (!hasSession && idleTimeoutMinutes === undefined) continue;
+        if (!hasSession && idleTimeoutMinutes === undefined && !contextMessageIds) continue;
         this.data[chatId] = {
           ...(sessionId !== undefined ? { sessionId } : {}),
           ...(cwd !== undefined ? { cwd } : {}),
           updatedAt: entry.updatedAt,
           ...(idleTimeoutMinutes !== undefined ? { idleTimeoutMinutes } : {}),
+          ...(contextMessageIds ? { contextMessageIds } : {}),
         };
       }
     } catch (err) {
@@ -73,10 +100,36 @@ export class SessionStore {
   getRaw(chatId: string): SessionEntry | undefined {
     return this.data[chatId];
   }
+  seenContextMessageIds(scopeId: string, layer: 'chat' | 'topic'): ReadonlySet<string> {
+    return new Set(this.data[scopeId]?.contextMessageIds?.[layer] ?? []);
+  }
+
+  markContextMessagesSeen(
+    scopeId: string,
+    input: { chat?: Iterable<string>; topic?: Iterable<string> },
+  ): void {
+    const prev = this.data[scopeId];
+    const merge = (layer: 'chat' | 'topic', next: Iterable<string> | undefined): string[] => [
+      ...(prev?.contextMessageIds?.[layer] ?? []),
+      ...(next ?? []),
+    ];
+    const contextMessageIds = normalizeContextMessageIds({
+      chat: merge('chat', input.chat),
+      topic: merge('topic', input.topic),
+    });
+    if (!contextMessageIds) return;
+    this.data[scopeId] = {
+      ...(prev ?? {}),
+      updatedAt: Date.now(),
+      contextMessageIds,
+    };
+    this.schedulePersist();
+  }
+
 
   set(chatId: string, sessionId: string, cwd: string): void {
-    // Preserve idleTimeoutMinutes across run starts — it's a per-scope
-    // preference, not per-run-instance state. /new (clear) wipes it.
+    // Preserve per-scope preferences and context cursors across run starts.
+    // /new (clear) intentionally wipes the inherited-context cursor.
     const prev = this.data[chatId];
     this.data[chatId] = {
       sessionId,
@@ -84,6 +137,9 @@ export class SessionStore {
       updatedAt: Date.now(),
       ...(prev?.idleTimeoutMinutes !== undefined
         ? { idleTimeoutMinutes: prev.idleTimeoutMinutes }
+        : {}),
+      ...(prev?.contextMessageIds
+        ? { contextMessageIds: prev.contextMessageIds }
         : {}),
     };
     this.schedulePersist();

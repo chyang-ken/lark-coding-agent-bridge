@@ -87,6 +87,7 @@ export async function saveAccessConfig(
             allowedUsers: access.allowedUsers,
             allowedChats: access.allowedChats,
             admins: access.admins,
+            resourceGroupChats: access.resourceGroupChats,
             ...(access.chatRequireMention && Object.keys(access.chatRequireMention).length > 0
               ? { chatRequireMention: access.chatRequireMention }
               : {}),
@@ -110,6 +111,7 @@ export async function saveAccessConfig(
       log.info('config-ops', 'access-mutated', {
         allowedUsers: access.allowedUsers.length,
         allowedChats: access.allowedChats.length,
+        resourceGroupChats: access.resourceGroupChats.length,
         admins: access.admins.length,
       });
       return access;

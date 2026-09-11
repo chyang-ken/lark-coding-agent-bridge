@@ -79,8 +79,8 @@ describe('signed card callback dispatch', () => {
     expect(h.pending.cancel('oc_group')).toHaveLength(0);
   });
 
-  it('scopes topic-group callbacks by the carrier message thread_id', async () => {
-    const h = await createHarness({ chatMode: 'topic' });
+  it('scopes callbacks by the carrier thread even when chat mode says regular group', async () => {
+    const h = await createHarness({ chatMode: 'group' });
     // The dispatcher must read items[0].thread_id from the raw message get to
     // compose the `${chatId}:${threadId}` scope. A regression here (e.g. using
     // channel.fetchMessage, whose normalized shape drops thread_id) would fall

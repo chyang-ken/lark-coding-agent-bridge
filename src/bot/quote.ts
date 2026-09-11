@@ -227,6 +227,115 @@ export async function fetchTopicContext(
   }
   return out;
 }
+export interface ContextFetchResult {
+  messages: QuotedContext[];
+  truncated: boolean;
+}
+
+interface FetchContextOptions {
+  maxMessages: number;
+  excludeIds?: ReadonlySet<string>;
+  seenIds?: ReadonlySet<string>;
+  humanOnly?: boolean;
+}
+
+/** Fetch unseen parent-group messages, excluding topic-local replies. */
+export function fetchChatContext(
+  channel: LarkChannel,
+  chatId: string,
+  opts: FetchContextOptions,
+): Promise<ContextFetchResult> {
+  return fetchContainerContext(channel, 'chat', chatId, opts);
+}
+
+/** Fetch unseen messages from one Feishu topic. */
+export function fetchTopicContextUpdates(
+  channel: LarkChannel,
+  threadId: string,
+  opts: FetchContextOptions,
+): Promise<ContextFetchResult> {
+  return fetchContainerContext(channel, 'thread', threadId, opts);
+}
+
+async function fetchContainerContext(
+  channel: LarkChannel,
+  containerType: 'chat' | 'thread',
+  containerId: string,
+  opts: FetchContextOptions,
+): Promise<ContextFetchResult> {
+  const collected: ApiMessageItem[] = [];
+  const scanLimit =
+    opts.maxMessages * 4 + (opts.seenIds?.size ?? 0) + (opts.excludeIds?.size ?? 0);
+  let pageToken: string | undefined;
+  try {
+    do {
+      const res = await channel.rawClient.im.v1.message.list({
+        params: {
+          container_id_type: containerType,
+          container_id: containerId,
+          sort_type: 'ByCreateTimeDesc',
+          page_size: 50,
+          ...(pageToken ? { page_token: pageToken } : {}),
+        },
+      });
+      const data = (res as {
+        data?: {
+          items?: ApiMessageItem[];
+          messages?: ApiMessageItem[];
+          has_more?: boolean;
+          page_token?: string;
+        };
+      }).data;
+      const items = data?.items ?? data?.messages ?? [];
+      collected.push(...items);
+      pageToken = data?.has_more ? data.page_token : undefined;
+    } while (pageToken && collected.length < scanLimit);
+  } catch (err) {
+    log.warn('context', 'fetch-failed', {
+      containerType,
+      containerId,
+      err: err instanceof Error ? err.message : String(err),
+    });
+    return { messages: [], truncated: false };
+  }
+
+  const exclude = opts.excludeIds ?? new Set<string>();
+  const seen = opts.seenIds ?? new Set<string>();
+  const relevant = collected.filter((item) => {
+    const messageId = item.message_id;
+    if (!messageId || exclude.has(messageId) || seen.has(messageId)) return false;
+    if ((item as { deleted?: boolean }).deleted || item.msg_type === 'system') return false;
+    if (opts.humanOnly && mapSenderType(item.sender?.sender_type) !== 'user') return false;
+    if (containerType === 'chat' && isTopicReply(item)) return false;
+    return true;
+  });
+  const selected = relevant.slice(0, opts.maxMessages).reverse();
+  const messages: QuotedContext[] = [];
+  for (const item of selected) {
+    const fetchSubMessages = async (mid: string): Promise<ApiMessageItem[]> => {
+      const source = mid === item.message_id ? [item] : await fetchSubTreeItems(channel, mid);
+      return source.map(preExpandInteractive);
+    };
+    const quoted = await normalizeItemToQuoted(channel, item, fetchSubMessages);
+    if (quoted) messages.push(quoted);
+  }
+  return {
+    messages,
+    truncated: relevant.length > opts.maxMessages || Boolean(pageToken),
+  };
+}
+
+function isTopicReply(item: ApiMessageItem): boolean {
+  const threadItem = item as ApiMessageItem & {
+    root_id?: string;
+    thread_id?: string;
+    thread_message_position?: string;
+  };
+  if (!threadItem.thread_id) return false;
+  if (threadItem.root_id && threadItem.root_id !== threadItem.message_id) return true;
+  const position = Number.parseInt(threadItem.thread_message_position ?? '', 10);
+  return Number.isFinite(position) && position > 0;
+}
 
 /**
  * Fetch a nested sub-message's items for merge_forward expansion. Unlike a

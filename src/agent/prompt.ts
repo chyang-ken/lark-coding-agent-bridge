@@ -52,6 +52,8 @@ export interface BridgePromptTopicMessage {
   content: string;
 }
 
+export type BridgePromptChatMessage = BridgePromptTopicMessage;
+
 export interface BridgePromptComment {
   commentScopeId: string;
   isWholeDocument: boolean;
@@ -76,7 +78,13 @@ export interface BuildAgentPromptInput {
   context: BridgePromptContext;
   instructions?: string[];
   userInput: string;
+  chatContext?: BridgePromptChatMessage[];
   topicContext?: BridgePromptTopicMessage[];
+  contextTruncation?: {
+    chat?: boolean;
+    topic?: boolean;
+    maxMessagesPerLayer: number;
+  };
   quotedMessages?: BridgePromptQuotedMessage[];
   interactiveCards?: BridgePromptInteractiveCard[];
   comment?: BridgePromptComment;
@@ -89,8 +97,14 @@ export function buildAgentPrompt(input: BuildAgentPromptInput): string {
     input.instructions && input.instructions.length > 0
       ? promptSection('bridge_instructions', input.instructions)
       : undefined,
+    input.chatContext && input.chatContext.length > 0
+      ? promptSection('chat_context', input.chatContext)
+      : undefined,
     input.topicContext && input.topicContext.length > 0
       ? promptSection('topic_context', input.topicContext)
+      : undefined,
+    input.contextTruncation && (input.contextTruncation.chat || input.contextTruncation.topic)
+      ? promptSection('context_limits', input.contextTruncation)
       : undefined,
     input.quotedMessages && input.quotedMessages.length > 0
       ? promptSection('quoted_messages', input.quotedMessages)

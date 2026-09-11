@@ -68,6 +68,7 @@ export interface ConfigView {
     allowedUsers: string[];
     allowedChats: string[];
     admins: string[];
+    resourceGroupChats: string[];
     /** Per-chat @-mention override (chat_id → bool); overrides the global
      * requireMentionInGroup. Absent chats follow the global setting. */
     chatRequireMention: Record<string, boolean>;
@@ -97,6 +98,7 @@ export function buildConfigView(state: MutableProfileState, live = false): Confi
       allowedUsers: state.profileConfig.access.allowedUsers,
       allowedChats: state.profileConfig.access.allowedChats,
       admins: state.profileConfig.access.admins,
+      resourceGroupChats: state.profileConfig.access.resourceGroupChats,
       chatRequireMention: state.profileConfig.access.chatRequireMention ?? {},
     },
     live,
@@ -352,6 +354,7 @@ const ACCESS_LIST: Record<AccessKind, 'allowedUsers' | 'admins' | 'allowedChats'
  *    `/invite` `/remove`. Removing a chat also drops its @-mention override.
  *  - `set-mention`: set (or clear) a chat's per-chat @-mention override. Pass
  *    `requireMention: true|false` to override, or `null` to follow the global.
+ *  - `set-resource`: enable/disable one-resource-per-thread mode for a chat.
  */
 export async function mutateAccess(
   state: MutableProfileState,
@@ -380,9 +383,28 @@ export async function mutateAccess(
     });
     return accessView(access);
   }
+  if (action === 'set-resource') {
+    if (!id) throw new ApiError(400, 'id is required');
+    if (typeof fv.enabled !== 'boolean') throw new ApiError(400, 'enabled must be boolean');
+    const access = await saveAccessConfig(state, (current) => {
+      const resourceGroups = new Set(current.resourceGroupChats);
+      if (fv.enabled) resourceGroups.add(id);
+      else resourceGroups.delete(id);
+      const chatRequireMention = { ...(current.chatRequireMention ?? {}) };
+      // Resource groups intentionally receive every eligible human message.
+      if (fv.enabled) chatRequireMention[id] = false;
+      return {
+        ...current,
+        resourceGroupChats: [...resourceGroups],
+        ...(Object.keys(chatRequireMention).length > 0 ? { chatRequireMention } : {}),
+      };
+    });
+    return accessView(access);
+  }
+
 
   if (action !== 'add' && action !== 'remove') {
-    throw new ApiError(400, 'action must be add|remove|set-mention');
+    throw new ApiError(400, 'action must be add|remove|set-mention|set-resource');
   }
   if (kind !== 'user' && kind !== 'admin' && kind !== 'chat') {
     throw new ApiError(400, 'kind must be user|admin|chat');
@@ -401,6 +423,9 @@ export async function mutateAccess(
       delete map[id];
       next.chatRequireMention = map;
     }
+    if (action === 'remove' && kind === 'chat') {
+      next.resourceGroupChats = next.resourceGroupChats.filter((chatId) => chatId !== id);
+    }
     return next;
   });
   return accessView(access);
@@ -411,6 +436,7 @@ function accessView(access: ProfileAccess): ConfigView['access'] {
     allowedUsers: access.allowedUsers,
     allowedChats: access.allowedChats,
     admins: access.admins,
+    resourceGroupChats: access.resourceGroupChats,
     chatRequireMention: access.chatRequireMention ?? {},
   };
 }

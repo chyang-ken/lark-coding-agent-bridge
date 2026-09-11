@@ -6,9 +6,11 @@ import type {
 import { createLarkChannel } from '@larksuite/channel';
 import { dirname, join } from 'node:path';
 import { claudeCapability, codexCapability } from '../agent/capability';
+import { bridgeInstructionsFor } from '../agent/bridge-instructions';
 import { modelLabel, normalizeModelSelection, resolveModelArg } from '../agent/models';
 import {
   buildAgentPrompt,
+  type BridgePromptChatMessage,
   type BridgePromptInteractiveCard,
   type BridgePromptMention,
   type BridgePromptQuotedMessage,
@@ -63,7 +65,12 @@ import { commandSessionCatalogIdentity } from './session-catalog-identity';
 import { startKeepalive } from './keepalive';
 import { PendingQueue } from './pending-queue';
 import { ProcessPool } from './process-pool';
-import { fetchQuotedContext, fetchTopicContext, type QuotedContext } from './quote';
+import {
+  fetchChatContext,
+  fetchQuotedContext,
+  fetchTopicContextUpdates,
+  type QuotedContext,
+} from './quote';
 import { lookupMessageThreadId } from './thread-id';
 import { addWorkingReaction, removeReaction } from './reaction';
 import { fetchKnownChats } from './lark-info';
@@ -78,13 +85,6 @@ import {
 const DEBOUNCE_MS = 600;
 const STREAM_TERMINAL_GRACE_MS = 3000;
 const REACTION_CLEANUP_GRACE_MS = 1000;
-
-const BRIDGE_AGENT_INSTRUCTIONS = [
-  '你在 bridge 进程中运行，普通 lark-cli 会继承 LARK_CHANNEL=1 并进入 bridge-bound 模式。',
-  '不要 unset LARK_CHANNEL / LARK_CHANNEL_HOME / LARK_CHANNEL_PROFILE / LARKSUITE_CLI_CONFIG_DIR，也不要用 env -u LARK_CHANNEL 绕回本机普通配置。',
-  'Codex bridge 默认使用 danger-full-access 对齐 Claude bridge 的 bypassPermissions 行为，因此 lark-cli 应能像用户本机终端一样访问 keychain。',
-  '如果提示 lark-channel context detected but not bound，停止当前操作并请用户重启 bridge 或运行 bridge doctor/preflight；不要改用普通 profile，不要自行 bind，也不要直接读取 config.json 里的账号或密钥。',
-];
 
 // Lark SDK logs API errors at error level even when the caller catches them.
 // These specific codes are EXPECTED in our flow (wiki-node lookup that
@@ -600,13 +600,15 @@ async function sendForwardFetchFailedHint(
   channel: LarkChannel,
   chatId: string,
   replyToMessageId: string,
+  replyInThread = false,
 ): Promise<void> {
   const text =
     '这条合并转发的内容没能从飞书拉取到（上游超时/网络抖动，已自动重试仍失败），' +
     '所以我没收到里面的消息。麻烦稍后重新转发一次。';
   try {
-    await channel.send(chatId, { text }, { replyTo: replyToMessageId });
-  } catch {
+    await channel.send(chatId, { text }, { replyTo: replyToMessageId, ...(replyInThread ? { replyInThread: true } : {}) });
+  } catch (err) {
+    if (replyInThread) throw err;
     await channel.send(chatId, { text });
   }
 }
@@ -632,6 +634,44 @@ type LogThreadModeOverride = (input: {
   resolvedMode: ChatMode;
   threadId: string;
 }) => void;
+interface ResourceMessage extends NormalizedMessage {
+  resourceReceiptMessageId?: string;
+}
+
+const RESOURCE_ROOT_TYPES = new Set(['text', 'post', 'image', 'file', 'merge_forward']);
+
+function isEligibleResourceRoot(msg: NormalizedMessage): boolean {
+  const isRoot = !msg.rootId || msg.rootId === msg.messageId;
+  return (
+    isRoot &&
+    !msg.threadId &&
+    senderTypeOf(msg) === 'user' &&
+    RESOURCE_ROOT_TYPES.has(msg.rawContentType)
+  );
+}
+
+async function openResourceThread(
+  channel: LarkChannel,
+  msg: NormalizedMessage,
+): Promise<{ threadId: string; receiptMessageId: string }> {
+  const receipt = await channel.send(
+    msg.chatId,
+    { text: '已收到，正在处理…' },
+    { replyTo: msg.messageId, replyInThread: true },
+  );
+  if (!receipt.messageId?.trim()) {
+    throw new Error('resource thread receipt missing message id');
+  }
+
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    for (const messageId of [receipt.messageId, msg.messageId]) {
+      const threadId = await lookupMessageThreadId(channel, messageId);
+      if (threadId) return { threadId, receiptMessageId: receipt.messageId };
+    }
+    await delay(80 * (attempt + 1));
+  }
+  throw new Error('resource thread id not visible after threaded receipt');
+}
 
 async function intakeMessage(deps: IntakeDeps): Promise<void> {
   const {
@@ -653,6 +693,10 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   // Resolve scope (and underlying chat mode) once at intake — every
   // downstream consumer keys off these.
   const resolvedMode = await chatModeCache.resolve(channel, msg.chatId);
+  const resourceGroup =
+    msg.chatType !== 'p2p' &&
+    resolvedMode === 'group' &&
+    controls.profileConfig.access.resourceGroupChats.includes(msg.chatId);
   // Feishu delivers a sizable fraction of topic-group message events without a
   // `thread_id` (notably the message that opens a new topic). We route topic
   // replies (`replyInThread`) and isolate per-topic session scope off it, so a
@@ -674,11 +718,11 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   // Carry the (possibly backfilled) threadId on the message so the batched
   // flush — which reads `firstMsg.threadId` for reply routing and topic scope —
   // sees it.
-  const emsg: NormalizedMessage = threadId === msg.threadId ? msg : { ...msg, threadId };
+  let emsg: ResourceMessage = threadId === msg.threadId ? msg : { ...msg, threadId };
   // Some groups are converted into topic groups after creation. In that state
   // getChatMode can lag behind the message event shape, so threadId is the
   // stronger signal for topic-scoped sessions and reply routing.
-  const chatMode = threadId ? 'topic' : resolvedMode;
+  let chatMode: ChatMode = threadId ? 'topic' : resolvedMode;
   if (threadId && resolvedMode !== 'topic') {
     chatModeCache.invalidate(msg.chatId);
     logThreadModeOverride({
@@ -687,9 +731,48 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
       threadId,
     });
   }
-  const scope = chatMode === 'topic' && threadId
+  let scope = chatMode === 'topic' && threadId
     ? `${msg.chatId}:${threadId}`
     : msg.chatId;
+  const ensureResourceRoute = async (): Promise<boolean> => {
+    if (!resourceGroup || threadId) return true;
+    if (!isEligibleResourceRoot(emsg)) return false;
+    let routed: Awaited<ReturnType<typeof openResourceThread>>;
+    try {
+      routed = await openResourceThread(channel, emsg);
+    } catch (err) {
+      log.fail('resource-thread-open', err);
+      await channel
+        .send(
+          emsg.chatId,
+          {
+            text: '话题已经创建，但我暂时无法确认它的标识，所以没有开始处理。请进入这个话题再发一句话重试。',
+          },
+          { replyTo: emsg.messageId, replyInThread: true },
+        )
+        .catch((sendErr) =>
+          log.warn('intake', 'resource-thread-failed-hint-failed', {
+            err: String(sendErr),
+          }),
+        );
+      return false;
+    }
+    threadId = routed.threadId;
+    emsg = {
+      ...emsg,
+      threadId,
+      resourceReceiptMessageId: routed.receiptMessageId,
+    };
+    chatMode = 'topic';
+    scope = `${msg.chatId}:${threadId}`;
+    log.info('intake', 'resource-thread-opened', {
+      chatId: msg.chatId,
+      threadId,
+      msgId: msg.messageId,
+      receiptMessageId: routed.receiptMessageId,
+    });
+    return true;
+  };
   log.info('intake', 'enter', {
     scope,
     chatType: msg.chatType,
@@ -731,10 +814,32 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   // targeted or undirected chatter.
   if (
     msg.chatType !== 'p2p' &&
+    !resourceGroup &&
     requireMentionForChat(controls.profileConfig, controls.cfg, msg.chatId) &&
     !msg.mentionedBot
   ) {
     log.info('intake', 'skip-no-mention', { scope, chatType: msg.chatType });
+    return;
+  }
+  if (
+    resourceGroup &&
+    (senderTypeOf(emsg) !== 'user' || emsg.rawContentType === 'system')
+  ) {
+    log.info('intake', 'skip-resource-non-human', {
+      chatId: emsg.chatId,
+      msgId: emsg.messageId,
+      senderType: senderTypeOf(emsg),
+      rawContentType: emsg.rawContentType,
+    });
+    return;
+  }
+
+  if (resourceGroup && isForwardFetchFailed(emsg) && !(await ensureResourceRoute())) {
+    log.info('intake', 'skip-ineligible-resource-root', {
+      chatId: emsg.chatId,
+      msgId: emsg.messageId,
+      rawContentType: emsg.rawContentType,
+    });
     return;
   }
 
@@ -749,7 +854,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
       msgId: emsg.messageId,
       chatType: emsg.chatType,
     });
-    await sendForwardFetchFailedHint(channel, emsg.chatId, emsg.messageId).catch((err) =>
+    await sendForwardFetchFailedHint(channel, emsg.chatId, emsg.messageId, Boolean(emsg.threadId)).catch((err) =>
       log.warn('intake', 'forward-fetch-failed-hint-failed', { err: String(err) }),
     );
     return;
@@ -780,6 +885,14 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   if (handled) {
     const dropped = pending.cancel(scope);
     log.info('intake', 'command', { scope, droppedPending: dropped.length });
+    return;
+  }
+  if (!(await ensureResourceRoute())) {
+    log.info('intake', 'skip-ineligible-resource-root', {
+      chatId: emsg.chatId,
+      msgId: emsg.messageId,
+      rawContentType: emsg.rawContentType,
+    });
     return;
   }
 
@@ -871,26 +984,44 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     }
   }
 
-  // Topic upstream context. When the bot is pulled into a topic for the FIRST
-  // time (no session yet for this scope), the topic's earlier messages — the
-  // root question that may never have @-mentioned the bot, plus prior replies —
-  // live nowhere the agent can see them. Fetch them so it isn't blind to what
-  // the user is pointing at. An already-engaged topic keeps that history in its
-  // resumed session, so we skip the fetch there.
+  const maxContextMessages = 40;
+  const resourceReceiptIds = batch
+    .map((message) => (message as ResourceMessage).resourceReceiptMessageId)
+    .filter((messageId): messageId is string => Boolean(messageId));
+  const statusOriginMessageId = resourceReceiptIds.at(-1) ?? lastMsg.messageId;
+  const contextExcludeIds = new Set([...batchIds, ...quoteTargets, ...resourceReceiptIds]);
+  let chatContext: QuotedContext[] = [];
   let topicContext: QuotedContext[] = [];
-  if (mode === 'topic' && threadId && !sessions.getRaw(scope)) {
-    const exclude = new Set([...batchIds, ...quoteTargets]);
-    topicContext = await fetchTopicContext(channel, threadId, {
-      maxMessages: 40,
-      excludeIds: exclude,
+  let chatContextTruncated = false;
+  let topicContextTruncated = false;
+  if (mode === 'topic' && threadId) {
+    const resourceGroup = controls.profileConfig.access.resourceGroupChats.includes(chatId);
+    const [chatUpdates, topicUpdates] = await Promise.all([
+      fetchChatContext(channel, chatId, {
+        maxMessages: maxContextMessages,
+        excludeIds: contextExcludeIds,
+        seenIds: sessions.seenContextMessageIds(scope, 'chat'),
+        humanOnly: true,
+      }),
+      fetchTopicContextUpdates(channel, threadId, {
+        maxMessages: maxContextMessages,
+        excludeIds: contextExcludeIds,
+        seenIds: sessions.seenContextMessageIds(scope, 'topic'),
+        humanOnly: resourceGroup,
+      }),
+    ]);
+    chatContext = chatUpdates.messages;
+    topicContext = topicUpdates.messages;
+    chatContextTruncated = chatUpdates.truncated;
+    topicContextTruncated = topicUpdates.truncated;
+    log.info('context', 'fetched', {
+      scope,
+      threadId,
+      chatMessages: chatContext.length,
+      topicMessages: topicContext.length,
+      chatTruncated: chatContextTruncated,
+      topicTruncated: topicContextTruncated,
     });
-    if (topicContext.length > 0) {
-      log.info('topic', 'context-fetched', {
-        scope,
-        threadId,
-        count: topicContext.length,
-      });
-    }
   }
 
   // Detect a model switch since this scope's last run. When resuming an
@@ -918,12 +1049,19 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     batch,
     attachments,
     quotes,
+    chatContext,
     topicContext,
+    {
+      chat: chatContextTruncated,
+      topic: topicContextTruncated,
+      maxMessagesPerLayer: maxContextMessages,
+    },
     channel.botIdentity,
     extraInstructions,
   );
   log.info('prompt', 'built', {
     promptChars: prompt.length,
+    chatContext: chatContext.length,
     quotes: quotes.length,
     topicContext: topicContext.length,
     ...(modelSwitched ? { modelSwitchedTo: modelSelection } : {}),
@@ -991,6 +1129,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     return;
   }
 
+  const directlyObservedIds = [...batchIds, ...quoteTargets, ...resourceReceiptIds];
+  sessions.markContextMessagesSeen(scope, {
+    chat: [...chatContext.map((message) => message.messageId), ...directlyObservedIds],
+    topic: [...topicContext.map((message) => message.messageId), ...directlyObservedIds],
+  });
   const { execution, cwdRealpath: cwd } = flow;
   activePolicyFingerprints.set(scope, flow.policy.policyFingerprint);
   const handle = execution.handle;
@@ -1071,7 +1214,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   // Add a "Typing" reaction to the triggering message as an instant ack, but
   // never let that outbound API call block agent event draining.
   const reactionPromise =
-    cotEnabled || replyMode === 'card' ? undefined : addWorkingReaction(channel, lastMsg.messageId);
+    cotEnabled || replyMode === 'card' ? undefined : addWorkingReaction(channel, statusOriginMessageId);
 
   try {
     if (cotEnabled) {
@@ -1082,7 +1225,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         // triggering message is itself in-topic, so the bubble lands in the
         // topic; message_cot has no thread_id receive type, so origin is the
         // only lever we have (see CotClient.create).
-        originMessageId: lastMsg.messageId,
+        originMessageId: statusOriginMessageId,
         runId: execution.runId,
         scope,
         inputPreview: lastMsg.content,
@@ -1286,7 +1429,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     log.fail('stream', err);
   } finally {
     activePolicyFingerprints.delete(scope);
-    scheduleWorkingReactionCleanup(channel, lastMsg.messageId, reactionPromise);
+    scheduleWorkingReactionCleanup(channel, statusOriginMessageId, reactionPromise);
   }
 }
 
@@ -1804,7 +1947,13 @@ function buildPrompt(
   batch: NormalizedMessage[],
   attachments: LocalAttachment[],
   quotes: QuotedContext[] = [],
+  chatContext: QuotedContext[] = [],
   topicContext: QuotedContext[] = [],
+  contextTruncation: {
+    chat: boolean;
+    topic: boolean;
+    maxMessagesPerLayer: number;
+  } = { chat: false, topic: false, maxMessagesPerLayer: 40 },
   botIdentity?: { openId: string; name?: string },
   extraInstructions?: string[],
 ): string {
@@ -1832,6 +1981,17 @@ function buildPrompt(
 
   const senderType = senderTypeOf(first);
   const mentions = mergeMentions(batch);
+  const interactiveCards = batch.map(toPromptInteractiveCard).filter(isDefined);
+  const dynamicInstructions = bridgeInstructionsFor({
+    source: 'im',
+    ...(senderType ? { senderType } : {}),
+    ...(botIdentity?.openId ? { botOpenId: botIdentity.openId } : {}),
+    ...(mentions.length > 0 ? { mentions } : {}),
+    messageTypes: batch.map((message) => message.rawContentType),
+    text: userPart,
+    hasInteractiveCard: interactiveCards.length > 0,
+  });
+  const instructions = [...dynamicInstructions, ...(extraInstructions ?? [])];
 
   return buildAgentPrompt({
     context: {
@@ -1846,14 +2006,13 @@ function buildPrompt(
       messageIds: batch.map((m) => m.messageId),
       source: 'im',
     },
-    instructions:
-      extraInstructions && extraInstructions.length > 0
-        ? [...BRIDGE_AGENT_INSTRUCTIONS, ...extraInstructions]
-        : BRIDGE_AGENT_INSTRUCTIONS,
+    ...(instructions.length > 0 ? { instructions } : {}),
     userInput: userPart,
     ...(topicContext.length > 0 ? { topicContext: topicContext.map(toPromptTopicMessage) } : {}),
+    ...(chatContext.length > 0 ? { chatContext: chatContext.map(toPromptChatMessage) } : {}),
     quotedMessages: quotes.map(toPromptQuote),
-    interactiveCards: batch.map(toPromptInteractiveCard).filter(isDefined),
+    ...(contextTruncation.chat || contextTruncation.topic ? { contextTruncation } : {}),
+    interactiveCards,
     attachments: attachments.map(toPromptAttachment),
   });
 }
@@ -1949,6 +2108,10 @@ function toPromptTopicMessage(q: QuotedContext): BridgePromptTopicMessage {
     rawContentType: q.rawContentType,
     content: q.content,
   };
+}
+
+function toPromptChatMessage(q: QuotedContext): BridgePromptChatMessage {
+  return toPromptTopicMessage(q);
 }
 
 function toPromptInteractiveCard(m: NormalizedMessage): BridgePromptInteractiveCard | undefined {

@@ -3,6 +3,8 @@ import { mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { CommentEvent, LarkChannel } from '@larksuite/channel';
 import { claudeCapability, codexCapability } from '../agent/capability';
+import { bridgeInstructionsFor } from '../agent/bridge-instructions';
+import { promptSection } from '../agent/prompt';
 import type { AgentAdapter, AgentEvent } from '../agent/types';
 import { getAgentStopGraceMs } from '../config/schema';
 import type { Controls } from '../commands';
@@ -472,7 +474,13 @@ export function buildCommentPrompt(
   ctx: CommentContext,
 ): string {
   const docUrl = `https://feishu.cn/${target.fileType}/${target.fileToken}`;
-  const parts: string[] = [];
+  const parts: string[] = [
+    promptSection(
+      'bridge_instructions',
+      bridgeInstructionsFor({ source: 'comment', text: ctx.question }),
+    ),
+    '',
+  ];
   parts.push('我在飞书云文档里被 @了。文档信息：');
   parts.push(`- 链接：${docUrl}`);
   parts.push(`- file_token：${target.fileToken}`);

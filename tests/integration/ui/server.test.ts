@@ -165,6 +165,32 @@ describe('ui server (supervisor-backed)', () => {
     expect(removed.allowedUsers).not.toContain('ou_alice');
   });
 
+
+  it('enables resource-group mode, forces no-mention routing, and removes both with the chat', async () => {
+    await json(await post('/api/access', handle.token, {
+      action: 'add',
+      kind: 'chat',
+      id: 'oc_resource',
+    }));
+
+    const enabled = await json(await post('/api/access', handle.token, {
+      action: 'set-resource',
+      id: 'oc_resource',
+      enabled: true,
+    }));
+    expect(enabled.resourceGroupChats).toEqual(['oc_resource']);
+    expect(enabled.chatRequireMention).toEqual({ oc_resource: false });
+    expect(online.get('claude').profileConfig.access.resourceGroupChats).toEqual(['oc_resource']);
+
+    const removed = await json(await post('/api/access', handle.token, {
+      action: 'remove',
+      kind: 'chat',
+      id: 'oc_resource',
+    }));
+    expect(removed.resourceGroupChats).toEqual([]);
+    expect(removed.chatRequireMention).toEqual({});
+  });
+
   it('sets and clears a per-chat @-mention override, and drops it when the chat is removed', async () => {
     await json(await post('/api/access', handle.token, { action: 'add', kind: 'chat', id: 'oc_grp' }));
 

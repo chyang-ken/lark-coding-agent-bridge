@@ -121,6 +121,18 @@ export function ConfigView({ profile }: { profile: string }) {
       toast.error(String((e as Error).message ?? e));
     }
   }
+  async function setResourceGroup(id: string, enabled: boolean) {
+    try {
+      const acc = await apiPost<ConfigData["access"]>(
+        `/api/access?profile=${encodeURIComponent(profile)}`,
+        { action: "set-resource", kind: "chat", id, enabled },
+      );
+      setCfg((c) => (c ? { ...c, access: acc } : c));
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e));
+    }
+  }
+
 
   return (
     <div className="space-y-4">
@@ -205,6 +217,7 @@ export function ConfigView({ profile }: { profile: string }) {
             profile={profile}
             ids={cfg.access.allowedChats}
             chatRequireMention={cfg.access.chatRequireMention}
+            resourceGroupChats={cfg.access.resourceGroupChats}
             chatNames={chatNames}
             globalRequire={cfg.requireMentionInGroup}
             onAdd={(id, name) => {
@@ -213,6 +226,7 @@ export function ConfigView({ profile }: { profile: string }) {
             }}
             onRemove={(id) => access("remove", "chat", id)}
             onSetMention={setMention}
+            onSetResourceGroup={setResourceGroup}
           />
           <Separator />
           <AccessList label="管理员（open_id）" placeholder="ou_..." ids={cfg.access.admins}
@@ -562,20 +576,24 @@ function AllowedChats({
   profile,
   ids,
   chatRequireMention,
+  resourceGroupChats,
   chatNames,
   globalRequire,
   onAdd,
   onRemove,
   onSetMention,
+  onSetResourceGroup,
 }: {
   profile: string;
   ids: string[];
   chatRequireMention: Record<string, boolean>;
+  resourceGroupChats: string[];
   chatNames: Record<string, string>;
   globalRequire: boolean;
   onAdd: (id: string, name?: string) => void;
   onRemove: (id: string) => void;
   onSetMention: (id: string, requireMention: boolean | null) => void;
+  onSetResourceGroup: (id: string, enabled: boolean) => void;
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [draft, setDraft] = useState("");
@@ -588,6 +606,7 @@ function AllowedChats({
         {ids.map((id) => {
           const override = chatRequireMention[id];
           const value = override === undefined ? "global" : override ? "on" : "off";
+          const resourceGroup = resourceGroupChats.includes(id);
           return (
             <div key={id} className="flex items-center gap-2 px-3 py-2">
               <div className="min-w-0 flex-1">
@@ -595,6 +614,7 @@ function AllowedChats({
                 <div className="truncate font-mono text-xs text-muted-foreground">{id}</div>
               </div>
               <Select
+                disabled={resourceGroup}
                 value={value}
                 onValueChange={(v) => onSetMention(id, v === "global" ? null : v === "on")}
               >
@@ -605,6 +625,13 @@ function AllowedChats({
                   <SelectItem value="off">无需 @</SelectItem>
                 </SelectContent>
               </Select>
+              <div className="flex items-center gap-2 whitespace-nowrap">
+                <Label className="text-xs">资源群</Label>
+                <Switch
+                  checked={resourceGroup}
+                  onCheckedChange={(enabled) => onSetResourceGroup(id, enabled)}
+                />
+              </div>
               <Button variant="ghost" size="sm" onClick={() => onRemove(id)}>移除</Button>
             </div>
           );
@@ -616,7 +643,7 @@ function AllowedChats({
         <Button variant="outline" onClick={() => { onAdd(draft); setDraft(""); }}>添加</Button>
       </div>
       <p className="text-xs text-muted-foreground">
-        每个群可单独设置是否需要 @ bot；「跟随全局」时用上面「回复与运行」里的默认值。
+        资源群会把每条人类主界面消息变成独立话题，并自动设为无需 @；需要应用权限 im:message.group_msg。
       </p>
       <GroupPicker
         profile={profile}

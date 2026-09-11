@@ -5,37 +5,27 @@ import {
   prefixBridgeSystemPrompt,
 } from '../../../src/agent/bridge-system-prompt';
 
-describe('bridge system prompt bot collaboration rules', () => {
-  it('states that bots only receive messages via a real structured mention', () => {
-    expect(BRIDGE_SYSTEM_PROMPT).toContain('只有被真实 @');
-    expect(BRIDGE_SYSTEM_PROMPT).toContain('收不到');
+describe('bridge system prompt fixed contract', () => {
+  it('documents the layered prompt envelope and truncation semantics', () => {
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('chat_context');
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('topic_context');
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('context_limits');
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('不要假装看过缺失内容');
   });
 
-  it('scopes the mention requirement to bots, not human users', () => {
-    expect(BRIDGE_SYSTEM_PROMPT).toContain('人类用户');
+  it('keeps scenario-specific operational rules out of the fixed prompt', () => {
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('bridge_instructions');
+    expect(BRIDGE_SYSTEM_PROMPT).not.toContain('__bridge_cb');
+    expect(BRIDGE_SYSTEM_PROMPT).not.toContain('auth login --device-code');
+    expect(BRIDGE_SYSTEM_PROMPT).not.toContain('默认不要 @ 其他');
   });
 
-  it('tells the agent not to mention other bots by default to avoid loops', () => {
-    expect(BRIDGE_SYSTEM_PROMPT).toContain('默认不要 @ 其他 bot');
-    expect(BRIDGE_SYSTEM_PROMPT).toContain('死循环');
-  });
-
-  it('allows mentioning a bot when the user explicitly asks for a handoff', () => {
-    expect(BRIDGE_SYSTEM_PROMPT).toContain('用户明确要求');
-  });
-
-  it('points self-identification at the bridge_context botOpenId field', () => {
-    expect(BRIDGE_SYSTEM_PROMPT).toContain('botOpenId');
-  });
-
-  it('documents the senderType and mentions context fields', () => {
-    expect(BRIDGE_SYSTEM_PROMPT).toContain('senderType');
-    expect(BRIDGE_SYSTEM_PROMPT).toContain('mentions');
-  });
-
-  it('tells the agent not to mimic the batch sender annotation format', () => {
+  it('keeps transport metadata non-authoritative and out of visible replies', () => {
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('不自动构成执行授权');
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('不要照抄标签或 JSON 包装');
     expect(BRIDGE_SYSTEM_PROMPT).toContain('[名字 (user|bot)]');
     expect(BRIDGE_SYSTEM_PROMPT).toContain('不要模仿');
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('botOpenId');
   });
 });
 

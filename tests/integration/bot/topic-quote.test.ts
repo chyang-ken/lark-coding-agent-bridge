@@ -58,6 +58,8 @@ interface FakeLarkChannel {
   disconnect(): Promise<void>;
   getChatMode(chatId: string): Promise<'group' | 'topic'>;
   getConnectionStatus(): { state: 'connected'; reconnectAttempts: number };
+  addReaction: ReturnType<typeof vi.fn>;
+  removeReaction: ReturnType<typeof vi.fn>;
   send(chatId: string, content: unknown, options?: unknown): Promise<{ messageId: string }>;
   stream(chatId: string, input: unknown, options?: unknown): Promise<{ messageId: string }>;
 }
@@ -254,27 +256,54 @@ describe('topic message quote handling', () => {
     expect(topicBlock).not.toContain('om_at_in_topic');
   });
 
-  it('does not fetch topic context when the topic session already exists', async () => {
-    // A prior session for this topic scope means the history is already in the
-    // resumed conversation — no need to re-fetch and re-inject it every turn.
+  it('injects only unseen parent-chat and same-topic messages when a session resumes', async () => {
     const h = await createHarness({
       chatMode: 'topic',
+      chatMessages: [
+        {
+          message_id: 'om_parent_fresh',
+          msg_type: 'text',
+          body: { content: JSON.stringify({ text: 'fresh parent context' }) },
+          sender: { id: 'ou_parent', sender_type: 'user' },
+          create_time: '1760000003000',
+          thread_message_position: '-1',
+        },
+        {
+          message_id: 'om_parent_seen',
+          msg_type: 'text',
+          body: { content: JSON.stringify({ text: 'seen parent context' }) },
+          sender: { id: 'ou_parent', sender_type: 'user' },
+          create_time: '1760000000000',
+          thread_message_position: '-1',
+        },
+      ],
       threadMessages: [
         {
-          message_id: 'om_topic_root',
+          message_id: 'om_topic_fresh',
           msg_type: 'text',
-          body: { content: JSON.stringify({ text: 'the real upstream question' }) },
+          body: { content: JSON.stringify({ text: 'fresh topic context' }) },
+          sender: { id: 'ou_asker', sender_type: 'user' },
+          create_time: '1760000002000',
+          thread_id: 'omt_existing',
+        },
+        {
+          message_id: 'om_topic_seen',
+          msg_type: 'text',
+          body: { content: JSON.stringify({ text: 'seen topic context' }) },
           sender: { id: 'ou_asker', sender_type: 'user' },
           create_time: '1760000000000',
           thread_id: 'omt_existing',
         },
       ],
     });
-    // Seed a session for the topic scope so it looks already-engaged.
-    h.sessions.set('oc_topic_chat:omt_existing', 'sess_existing', await realpath(h.tmp.workspace));
+    const scope = 'oc_topic_chat:omt_existing';
+    h.sessions.set(scope, 'sess_existing', await realpath(h.tmp.workspace));
+    h.sessions.markContextMessagesSeen(scope, {
+      chat: ['om_parent_seen'],
+      topic: ['om_topic_seen'],
+    });
 
     await startTestBridge(h);
-
     await h.channel.handlers.message?.(
       message({
         messageId: 'om_followup',
@@ -286,9 +315,18 @@ describe('topic message quote handling', () => {
     );
     await waitFor(() => h.agent.runOptions.length === 1);
 
-    expect(h.channel.rawClient.im.v1.message.list).not.toHaveBeenCalled();
+    expect(h.channel.rawClient.im.v1.message.list).toHaveBeenCalledTimes(2);
     const prompt = h.agent.runOptions[0]?.prompt ?? '';
-    expect(prompt).not.toContain('<topic_context>');
+    expect(prompt).toContain('fresh parent context');
+    expect(prompt).toContain('fresh topic context');
+    expect(prompt).not.toContain('seen parent context');
+    expect(prompt).not.toContain('seen topic context');
+    expect(h.sessions.seenContextMessageIds(scope, 'chat')).toEqual(
+      new Set(['om_parent_seen', 'om_parent_fresh', 'om_followup']),
+    );
+    expect(h.sessions.seenContextMessageIds(scope, 'topic')).toEqual(
+      new Set(['om_topic_seen', 'om_topic_fresh', 'om_followup']),
+    );
   });
 
   it('does not open a progress stream when the agent produces no content', async () => {
@@ -416,6 +454,248 @@ describe('topic message quote handling', () => {
   });
 });
 
+
+describe('resource group routing', () => {
+  it('opens one isolated topic without @, injects capped human context, and keeps follow-ups in it', async () => {
+    const parentMessages = [
+      ...Array.from({ length: 41 }, (_, index) => ({
+        message_id: 'om_parent_' + index,
+        msg_type: 'text',
+        body: { content: JSON.stringify({ text: 'parent context ' + index }) },
+        sender: { id: 'ou_parent', sender_type: 'user' },
+        create_time: String(1760000041000 - index),
+        thread_message_position: '-1',
+      })),
+      {
+        message_id: 'om_parent_bot',
+        msg_type: 'text',
+        body: { content: JSON.stringify({ text: 'Proma parent output' }) },
+        sender: { id: 'ou_proma', sender_type: 'app' },
+        create_time: '1760000000000',
+        thread_message_position: '-1',
+      },
+      {
+        message_id: 'om_sibling_reply',
+        root_id: 'om_other_root',
+        thread_id: 'omt_other',
+        msg_type: 'text',
+        body: { content: JSON.stringify({ text: 'sibling topic leak' }) },
+        sender: { id: 'ou_other', sender_type: 'user' },
+        create_time: '1759999999000',
+        thread_message_position: '2',
+      },
+    ];
+    const h = await createHarness({
+      chatMode: 'group',
+      resourceGroup: true,
+      rawThreadIds: { om_sent_1: 'omt_resource' },
+      chatMessages: parentMessages,
+      threadMessages: [
+        {
+          message_id: 'om_topic_human',
+          msg_type: 'text',
+          body: { content: JSON.stringify({ text: 'local human context' }) },
+          sender: { id: 'ou_other', sender_type: 'user' },
+          create_time: '1760000001000',
+          thread_id: 'omt_resource',
+        },
+        {
+          message_id: 'om_topic_bot',
+          msg_type: 'text',
+          body: { content: JSON.stringify({ text: 'Proma topic output' }) },
+          sender: { id: 'ou_proma', sender_type: 'app' },
+          create_time: '1760000000000',
+          thread_id: 'omt_resource',
+        },
+      ],
+      agentEvents: [
+        { type: 'text', delta: 'resource answer' },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+    });
+
+    await startTestBridge(h);
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_resource_root',
+        rootId: 'om_resource_root',
+        parentId: 'om_resource_root',
+        content: 'new resource',
+        mentionedBot: false,
+      }),
+    );
+    await waitFor(() => h.agent.runOptions.length === 1);
+    await waitFor(() => h.channel.streams.length === 1);
+
+    expect(h.channel.sent[0]).toMatchObject({
+      chatId: 'oc_topic_chat',
+      content: { text: '已收到，正在处理…' },
+      options: { replyTo: 'om_resource_root', replyInThread: true },
+    });
+    expect(h.channel.streams[0]?.options).toMatchObject({
+      replyTo: 'om_resource_root',
+      replyInThread: true,
+    });
+    expect(h.channel.addReaction).toHaveBeenCalledWith('om_sent_1', 'Typing');
+    expect(h.channel.addReaction).not.toHaveBeenCalledWith('om_resource_root', 'Typing');
+    const prompt = h.agent.runOptions[0]?.prompt ?? '';
+    expect(prompt).toContain('"threadId":"omt_resource"');
+    expect(prompt).toContain('local human context');
+    expect(prompt).not.toContain('Proma parent output');
+    expect(prompt).not.toContain('Proma topic output');
+    expect(prompt).not.toContain('sibling topic leak');
+    const chatContext = readPromptSection(prompt, 'chat_context') as Array<{ messageId: string }>;
+    expect(chatContext).toHaveLength(40);
+    expect(chatContext.some((item) => item.messageId === 'om_parent_0')).toBe(true);
+    expect(chatContext.some((item) => item.messageId === 'om_parent_40')).toBe(false);
+    expect(readPromptSection(prompt, 'context_limits')).toEqual({
+      chat: true,
+      topic: false,
+      maxMessagesPerLayer: 40,
+    });
+
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_resource_followup',
+        rootId: 'om_resource_root',
+        parentId: 'om_resource_root',
+        threadId: 'omt_resource',
+        content: 'follow up without mention',
+        mentionedBot: false,
+      }),
+    );
+    await waitFor(() => h.agent.runOptions.length === 2);
+    expect(
+      h.channel.sent.filter(
+        (item) => (item.content as { text?: string }).text === '已收到，正在处理…',
+      ),
+    ).toHaveLength(1);
+    expect(h.sessions.getRaw('oc_topic_chat:omt_resource')).toBeDefined();
+    expect(h.sessions.getRaw('oc_topic_chat')).toBeUndefined();
+  });
+
+
+  it('opens resources for every approved root message type', async () => {
+    const h = await createHarness({
+      chatMode: 'group',
+      resourceGroup: true,
+      rawThreadIds: {
+        om_sent_1: 'omt_post',
+        om_sent_2: 'omt_image',
+        om_sent_3: 'omt_file',
+        om_sent_4: 'omt_forward',
+      },
+    });
+    await startTestBridge(h);
+
+    const cases = [
+      ['post', 'omt_post'],
+      ['image', 'omt_image'],
+      ['file', 'omt_file'],
+      ['merge_forward', 'omt_forward'],
+    ] as const;
+    let expectedRuns = 0;
+    for (const [rawContentType, threadId] of cases) {
+      expectedRuns += 1;
+      const messageId = 'om_' + rawContentType;
+      await h.channel.handlers.message?.(
+        message({
+          messageId,
+          rootId: messageId,
+          parentId: messageId,
+          content: rawContentType === 'merge_forward' ? '<forwarded_messages/>' : 'resource',
+          rawContentType,
+          mentionedBot: false,
+        }),
+      );
+      await waitFor(() => h.agent.runOptions.length === expectedRuns);
+      expect(h.sessions.getRaw('oc_topic_chat:' + threadId)).toBeDefined();
+    }
+
+    expect(
+      h.channel.sent.filter(
+        (item) => (item.content as { text?: string }).text === '已收到，正在处理…',
+      ),
+    ).toHaveLength(4);
+  });
+
+  it('keeps a resource route failure inside the created thread', async () => {
+    const h = await createHarness({ chatMode: 'group', resourceGroup: true });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_unresolved_resource',
+        rootId: 'om_unresolved_resource',
+        parentId: 'om_unresolved_resource',
+        content: 'resource whose thread id is delayed',
+        mentionedBot: false,
+      }),
+    );
+
+    expect(h.agent.runOptions).toHaveLength(0);
+    expect(h.channel.sent).toHaveLength(2);
+    expect(h.channel.sent[1]).toMatchObject({
+      chatId: 'oc_topic_chat',
+      content: {
+        text: '话题已经创建，但我暂时无法确认它的标识，所以没有开始处理。请进入这个话题再发一句话重试。',
+      },
+      options: { replyTo: 'om_unresolved_resource', replyInThread: true },
+    });
+  });
+
+  it('does not open resource topics for bot messages, system messages, or commands', async () => {
+    const h = await createHarness({
+      chatMode: 'group',
+      resourceGroup: true,
+    });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_bot_root',
+        rootId: 'om_bot_root',
+        parentId: 'om_bot_root',
+        content: 'bot output',
+        mentionedBot: false,
+        senderType: 'bot',
+      }),
+    );
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_system_root',
+        rootId: 'om_system_root',
+        parentId: 'om_system_root',
+        content: 'system event',
+        rawContentType: 'system',
+        mentionedBot: false,
+      }),
+    );
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_command_root',
+        rootId: 'om_command_root',
+        parentId: 'om_command_root',
+        content: '/help',
+        mentionedBot: false,
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(h.agent.runOptions).toHaveLength(0);
+    expect(
+      h.channel.sent.some(
+        (item) => (item.content as { text?: string }).text === '已收到，正在处理…',
+      ),
+    ).toBe(false);
+    expect(
+      h.channel.sent.some(
+        (item) => (item.options as { replyInThread?: boolean } | undefined)?.replyInThread,
+      ),
+    ).toBe(false);
+  });
+});
+
 describe('merge_forward fetch failure', () => {
   it('skips the run and hints the user when the SDK could not fetch a merge_forward', async () => {
     // @larksuite/channel >= 0.4.1 normalizes an un-fetchable merge_forward to
@@ -468,7 +748,9 @@ async function createHarness(options: {
   chatMode?: 'group' | 'topic';
   quotedMessages?: Record<string, string>;
   rawThreadIds?: Record<string, string>;
+  chatMessages?: Array<Record<string, unknown>>;
   threadMessages?: Array<Record<string, unknown>>;
+  resourceGroup?: boolean;
   agentEvents?: AgentEvent[];
 } = {}):Promise<{
   tmp: TmpProfile;
@@ -493,6 +775,7 @@ async function createHarness(options: {
     access: {
       allowedChats: ['oc_topic_chat'],
       allowedUsers: ['ou_user'],
+      ...(options.resourceGroup ? { resourceGroupChats: ['oc_topic_chat'] } : {}),
     },
   });
   const profileConfig = {
@@ -546,7 +829,9 @@ function createFakeLarkChannel(options: {
   chatMode?: 'group' | 'topic';
   quotedMessages?: Record<string, string>;
   rawThreadIds?: Record<string, string>;
+  chatMessages?: Array<Record<string, unknown>>;
   threadMessages?: Array<Record<string, unknown>>;
+  resourceGroup?: boolean;
 } = {}):FakeLarkChannel & { handlers: MessageHandlerMap } {
   const handlers: MessageHandlerMap = {};
   const sent: Array<{ chatId: string; content: unknown; options: unknown }> = [];
@@ -556,6 +841,7 @@ function createFakeLarkChannel(options: {
     om_topic_root: 'topic root content',
   };
   const rawThreadIds = options.rawThreadIds ?? {};
+  const chatMessages = options.chatMessages ?? [];
   const threadMessages = options.threadMessages ?? [];
   return {
     handlers,
@@ -567,7 +853,12 @@ function createFakeLarkChannel(options: {
       im: {
         v1: {
           message: {
-            list: vi.fn(async () => ({ data: { items: threadMessages, has_more: false } })),
+            list: vi.fn(async (request: { params: { container_id_type: string } }) => ({
+              data: {
+                items: request.params.container_id_type === 'chat' ? chatMessages : threadMessages,
+                has_more: false,
+              },
+            })),
           },
           messageReaction: {
             create: vi.fn(async () => ({ data: { reaction_id: 'reaction_1' } })),
@@ -603,6 +894,8 @@ function createFakeLarkChannel(options: {
     getConnectionStatus() {
       return { state: 'connected', reconnectAttempts: 0 };
     },
+    addReaction: vi.fn(async () => 'reaction_1'),
+    removeReaction: vi.fn(async () => {}),
     async send(chatId, content, options) {
       sent.push({ chatId, content, options });
       return { messageId: `om_sent_${sent.length}` };
@@ -641,6 +934,7 @@ function message(input: {
   rawContentType?: string;
   mentionedBot?: boolean;
   mentions?: Array<{ key: string; openId: string; name: string; isBot: boolean }>;
+  senderType?: 'user' | 'bot';
 }): NormalizedMessage {
   const mentionedBot = input.mentionedBot ?? true;
   return {
@@ -664,6 +958,7 @@ function message(input: {
     ...(input.threadId ? { threadId: input.threadId } : {}),
     replyToMessageId: input.parentId,
     createTime: 1760000001000,
+    raw: { sender: { sender_type: input.senderType === 'bot' ? 'app' : 'user' } },
   } as unknown as NormalizedMessage;
 }
 
@@ -673,6 +968,13 @@ interface MarkdownStreamInput {
 
 function isMarkdownStreamInput(input: unknown): input is MarkdownStreamInput {
   return Boolean(input && typeof input === 'object' && 'markdown' in input);
+}
+
+
+function readPromptSection(prompt: string, tag: string): unknown {
+  const match = prompt.match(new RegExp('<' + tag + '>\\n([\\s\\S]*?)\\n</' + tag + '>'));
+  if (!match) throw new Error('missing prompt section ' + tag);
+  return JSON.parse(match[1] ?? 'null') as unknown;
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 1500): Promise<void> {

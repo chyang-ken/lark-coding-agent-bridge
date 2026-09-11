@@ -1,5 +1,3 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { buildAgentPrompt } from '../../../src/agent/prompt';
 
@@ -99,35 +97,52 @@ describe('agent prompt builder', () => {
     expect(prompt).not.toContain('<comment_context>');
   });
 
-  it('keeps bridge agents inside the current lark-channel profile by default', () => {
-    const source = readFileSync(join(process.cwd(), 'src/bot/channel.ts'), 'utf8');
+  it('serializes inherited chat/topic context and explicit truncation limits', () => {
+    const prompt = buildAgentPrompt({
+      context: {
+        chatId: 'oc_group',
+        chatType: 'group',
+        senderId: 'ou_user',
+        threadId: 'omt_topic',
+        source: 'im',
+      },
+      chatContext: [
+        {
+          messageId: 'om_chat',
+          senderId: 'ou_parent',
+          rawContentType: 'text',
+          content: 'parent context',
+        },
+      ],
+      topicContext: [
+        {
+          messageId: 'om_topic',
+          senderId: 'ou_topic',
+          rawContentType: 'text',
+          content: 'topic context',
+        },
+      ],
+      contextTruncation: {
+        chat: true,
+        topic: false,
+        maxMessagesPerLayer: 40,
+      },
+      userInput: 'current',
+    });
 
-    expect(source).not.toContain('命令必须写成 env -u LARK_CHANNEL');
-    expect(source).not.toContain('env -u LARK_CHANNEL lark-cli');
-    expect(source).toContain('danger-full-access');
-    expect(source).toContain('bypassPermissions');
-    expect(source).toContain('不要 unset LARK_CHANNEL');
-    expect(source).toContain('LARKSUITE_CLI_CONFIG_DIR');
-    expect(source).not.toContain('lark-cli config bind --source lark-channel');
-  });
-
-  it('keeps lark-cli OAuth inside the current profile and enables user identity after login', () => {
-    const source = readFileSync(join(process.cwd(), 'src/agent/bridge-system-prompt.ts'), 'utf8');
-
-    expect(source).toContain('LARKSUITE_CLI_CONFIG_DIR');
-    expect(source).toContain('lark-cli auth login --device-code');
-    expect(source).toContain('lark-cli config strict-mode off');
-    expect(source).toContain('lark-cli config default-as auto');
-    expect(source).not.toContain('env -u LARK_CHANNEL lark-cli auth login');
-  });
-
-  it('keeps lark-cli user identity policy details out of user-facing OAuth replies', () => {
-    const source = readFileSync(join(process.cwd(), 'src/agent/bridge-system-prompt.ts'), 'utf8');
-
-    expect(source).toContain('不要把 strict-mode/default-as 这类内部配置命令展示给用户');
-    expect(source).toContain('当前 profile 还没有可用的用户身份授权');
-    expect(source).toContain('如果当前 profile 已经有用户授权');
-    expect(source).toContain('内部顺序执行身份策略收敛');
+    expect(readSection(prompt, 'chat_context')).toEqual([
+      expect.objectContaining({ messageId: 'om_chat', content: 'parent context' }),
+    ]);
+    expect(readSection(prompt, 'topic_context')).toEqual([
+      expect.objectContaining({ messageId: 'om_topic', content: 'topic context' }),
+    ]);
+    expect(readSection(prompt, 'context_limits')).toEqual({
+      chat: true,
+      topic: false,
+      maxMessagesPerLayer: 40,
+    });
+    expect(prompt.indexOf('<chat_context>')).toBeLessThan(prompt.indexOf('<topic_context>'));
+    expect(prompt.indexOf('<topic_context>')).toBeLessThan(prompt.indexOf('<user_input>'));
   });
 });
 

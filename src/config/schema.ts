@@ -87,6 +87,10 @@ export interface AppAccess {
   /** Per-chat @-mention override (chat_id → bool); overrides the global
    * requireMentionInGroup for the listed chats. */
   chatRequireMention?: Record<string, boolean>;
+  /** Regular groups where each eligible human root message becomes its own
+   * resource thread. The bridge ignores bot/system roots in these chats and
+   * routes all agent output into the created thread. */
+  resourceGroupChats?: string[];
 }
 
 export interface AppPreferences {

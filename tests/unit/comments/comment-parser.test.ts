@@ -76,6 +76,9 @@ describe('comment parser', () => {
       { question: '@bot read this', isWhole: false, priorReplies: [] },
     );
 
+    expect(prompt).toContain('<bridge_instructions>');
+    expect(prompt).toContain('LARK_CHANNEL_PROFILE');
+    expect(prompt).toContain('不要用 env -u LARK_CHANNEL');
     expect(prompt).toContain(
       'lark-cli docs +fetch --api-version v2 --doc doc-token --doc-format markdown',
     );

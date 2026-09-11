@@ -53,6 +53,7 @@ export interface ConfigView {
     allowedUsers: string[];
     allowedChats: string[];
     admins: string[];
+    resourceGroupChats: string[];
     /** chat_id → per-chat @-mention override (overrides requireMentionInGroup). */
     chatRequireMention: Record<string, boolean>;
   };

@@ -1,4 +1,4 @@
-import { realpath } from 'node:fs/promises';
+import { mkdir, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { claudeCapability } from '../../../src/agent/capability';
@@ -98,6 +98,69 @@ describe('IM run flow', () => {
     if (!result.ok) throw new Error('expected run flow to start');
     expect(result.cwdRealpath).toBe(workspaceRealpath);
     expect(h.agent.runOptions[0]?.cwd).toBe(workspaceRealpath);
+  });
+
+
+  it('inherits the parent chat workspace for a topic scope', async () => {
+    const h = await createHarness();
+    const workspaceRealpath = await realpath(h.tmp.workspace);
+    h.workspaces.setCwd('chat-parent', h.tmp.workspace);
+
+    const result = await startRunFlow({
+      scopeId: 'chat-parent:thread-a',
+      scope: {
+        source: 'im',
+        chatId: 'chat-parent',
+        threadId: 'thread-a',
+        actorId: 'ou_user',
+      },
+      prompt: 'hello',
+      attachments: [],
+      access: { ok: true, reason: 'allowed-user' },
+      capability: claudeCapability(h.profileConfig),
+      profileConfig: h.profileConfig,
+      sessions: h.sessions,
+      workspaces: h.workspaces,
+      executor: h.executor,
+      now: 1000,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('expected run flow to start');
+    expect(result.cwdRealpath).toBe(workspaceRealpath);
+    expect(h.agent.runOptions[0]?.cwd).toBe(workspaceRealpath);
+  });
+
+  it('lets an explicit topic workspace override the parent chat workspace', async () => {
+    const h = await createHarness();
+    const topicWorkspace = join(h.tmp.root, 'topic-workspace');
+    await mkdir(topicWorkspace);
+    h.workspaces.setCwd('chat-parent', h.tmp.workspace);
+    h.workspaces.setCwd('chat-parent:thread-a', topicWorkspace);
+
+    const result = await startRunFlow({
+      scopeId: 'chat-parent:thread-a',
+      scope: {
+        source: 'im',
+        chatId: 'chat-parent',
+        threadId: 'thread-a',
+        actorId: 'ou_user',
+      },
+      prompt: 'hello',
+      attachments: [],
+      access: { ok: true, reason: 'allowed-user' },
+      capability: claudeCapability(h.profileConfig),
+      profileConfig: h.profileConfig,
+      sessions: h.sessions,
+      workspaces: h.workspaces,
+      executor: h.executor,
+      now: 1000,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('expected run flow to start');
+    expect(result.cwdRealpath).toBe(await realpath(topicWorkspace));
+    expect(h.agent.runOptions[0]?.cwd).toBe(await realpath(topicWorkspace));
   });
 
 });

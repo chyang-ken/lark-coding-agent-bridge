@@ -22,6 +22,8 @@ export interface ProfileAccess {
   allowedChats: string[];
   admins: string[];
   requireMentionInGroup: boolean;
+  /** Regular groups using one-human-root-message-per-resource-thread mode. */
+  resourceGroupChats: string[];
   /**
    * Per-chat override of {@link requireMentionInGroup}, keyed by chat_id.
    * `true` = require an @-mention in that chat, `false` = respond to every
@@ -348,6 +350,7 @@ function normalizeAccess(
     allowedChats: stringArray(access?.allowedChats),
     admins: stringArray(access?.admins),
     requireMentionInGroup: access?.requireMentionInGroup ?? legacyRequireMentionInGroup ?? true,
+    resourceGroupChats: stringArray(access?.resourceGroupChats),
     // Omit when empty so configs without per-chat overrides stay clean.
     ...(Object.keys(chatRequireMention).length > 0 ? { chatRequireMention } : {}),
   };
