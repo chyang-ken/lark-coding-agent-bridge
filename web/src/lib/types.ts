@@ -56,6 +56,8 @@ export interface ConfigView {
     resourceGroupChats: string[];
     /** chat_id → per-chat @-mention override (overrides requireMentionInGroup). */
     chatRequireMention: Record<string, boolean>;
+    /** chat_id → 每轮都会拼接的统一工作说明。 */
+    chatBasePrompts: Record<string, string>;
   };
   /** True when this profile's process hosts the UI (edits apply live). */
   live?: boolean;

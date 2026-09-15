@@ -31,6 +31,8 @@ export interface ProfileAccess {
    * priority over `requireMentionInGroup` for the chats it lists.
    */
   chatRequireMention?: Record<string, boolean>;
+  /** 按群配置、每轮都会拼接的统一工作说明。 */
+  chatBasePrompts?: Record<string, string>;
 }
 
 export interface SandboxConfig {
@@ -345,6 +347,7 @@ function normalizeAccess(
   legacyRequireMentionInGroup: boolean | undefined,
 ): ProfileAccess {
   const chatRequireMention = normalizeChatMentionMap(access?.chatRequireMention);
+  const chatBasePrompts = normalizeChatBasePromptMap(access?.chatBasePrompts);
   return {
     allowedUsers: stringArray(access?.allowedUsers),
     allowedChats: stringArray(access?.allowedChats),
@@ -353,6 +356,7 @@ function normalizeAccess(
     resourceGroupChats: stringArray(access?.resourceGroupChats),
     // Omit when empty so configs without per-chat overrides stay clean.
     ...(Object.keys(chatRequireMention).length > 0 ? { chatRequireMention } : {}),
+    ...(Object.keys(chatBasePrompts).length > 0 ? { chatBasePrompts } : {}),
   };
 }
 
@@ -362,6 +366,18 @@ function normalizeChatMentionMap(input: unknown): Record<string, boolean> {
   const out: Record<string, boolean> = {};
   for (const [chatId, value] of Object.entries(input as Record<string, unknown>)) {
     if (chatId && typeof value === 'boolean') out[chatId] = value;
+  }
+  return out;
+}
+
+/** 只保留按 chat_id 索引的非空字符串说明。 */
+function normalizeChatBasePromptMap(input: unknown): Record<string, string> {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return {};
+  const out: Record<string, string> = {};
+  for (const [chatId, value] of Object.entries(input as Record<string, unknown>)) {
+    if (!chatId || typeof value !== 'string') continue;
+    const prompt = value.trim();
+    if (prompt) out[chatId] = prompt;
   }
   return out;
 }

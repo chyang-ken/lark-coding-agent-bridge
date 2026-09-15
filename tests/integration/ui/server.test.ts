@@ -216,6 +216,42 @@ describe('ui server (supervisor-backed)', () => {
     expect(afterRemove.chatRequireMention).toEqual({});
   });
 
+  it('sets, clears, and removes a per-chat base prompt independently', async () => {
+    await json(await post('/api/access', handle.token, { action: 'add', kind: 'chat', id: 'oc_prompt' }));
+
+    const set = await json(await post('/api/access', handle.token, {
+      action: 'set-base-prompt',
+      kind: 'chat',
+      id: 'oc_prompt',
+      basePrompt: '  只处理当前资源  ',
+    }));
+    expect(set.chatBasePrompts).toEqual({ oc_prompt: '只处理当前资源' });
+    expect(online.get('claude').profileConfig.access.chatBasePrompts).toEqual({
+      oc_prompt: '只处理当前资源',
+    });
+
+    const cleared = await json(await post('/api/access', handle.token, {
+      action: 'set-base-prompt',
+      kind: 'chat',
+      id: 'oc_prompt',
+      basePrompt: '',
+    }));
+    expect(cleared.chatBasePrompts).toEqual({});
+
+    await json(await post('/api/access', handle.token, {
+      action: 'set-base-prompt',
+      kind: 'chat',
+      id: 'oc_prompt',
+      basePrompt: '待移除',
+    }));
+    const afterRemove = await json(await post('/api/access', handle.token, {
+      action: 'remove',
+      kind: 'chat',
+      id: 'oc_prompt',
+    }));
+    expect(afterRemove.chatBasePrompts).toEqual({});
+  });
+
   it('lists profiles with online flag from the supervisor', async () => {
     const { profiles } = await json(await get('/api/profiles', handle.token));
     const byName = Object.fromEntries(profiles.map((p: { name: string }) => [p.name, p]));

@@ -77,6 +77,8 @@ export interface BridgePromptAttachment {
 export interface BuildAgentPromptInput {
   context: BridgePromptContext;
   instructions?: string[];
+  /** 群所有者为当前群配置的统一工作说明。 */
+  chatBasePrompt?: string;
   userInput: string;
   chatContext?: BridgePromptChatMessage[];
   topicContext?: BridgePromptTopicMessage[];
@@ -97,6 +99,7 @@ export function buildAgentPrompt(input: BuildAgentPromptInput): string {
     input.instructions && input.instructions.length > 0
       ? promptSection('bridge_instructions', input.instructions)
       : undefined,
+    input.chatBasePrompt ? promptSection('chat_base_prompt', input.chatBasePrompt) : undefined,
     input.chatContext && input.chatContext.length > 0
       ? promptSection('chat_context', input.chatContext)
       : undefined,

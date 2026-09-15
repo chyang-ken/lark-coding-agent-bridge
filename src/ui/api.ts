@@ -72,6 +72,8 @@ export interface ConfigView {
     /** Per-chat @-mention override (chat_id → bool); overrides the global
      * requireMentionInGroup. Absent chats follow the global setting. */
     chatRequireMention: Record<string, boolean>;
+    /** 按群配置、每轮都会拼接的统一工作说明。 */
+    chatBasePrompts: Record<string, string>;
   };
   /** True when edits to this profile apply live (its process hosts the UI). */
   live: boolean;
@@ -100,6 +102,7 @@ export function buildConfigView(state: MutableProfileState, live = false): Confi
       admins: state.profileConfig.access.admins,
       resourceGroupChats: state.profileConfig.access.resourceGroupChats,
       chatRequireMention: state.profileConfig.access.chatRequireMention ?? {},
+      chatBasePrompts: state.profileConfig.access.chatBasePrompts ?? {},
     },
     live,
   };
@@ -355,6 +358,7 @@ const ACCESS_LIST: Record<AccessKind, 'allowedUsers' | 'admins' | 'allowedChats'
  *  - `set-mention`: set (or clear) a chat's per-chat @-mention override. Pass
  *    `requireMention: true|false` to override, or `null` to follow the global.
  *  - `set-resource`: enable/disable one-resource-per-thread mode for a chat.
+ *  - `set-base-prompt`: 设置单个群的 Prompt，空字符串表示清除。
  */
 export async function mutateAccess(
   state: MutableProfileState,
@@ -401,10 +405,22 @@ export async function mutateAccess(
     });
     return accessView(access);
   }
-
+  if (action === 'set-base-prompt') {
+    if (!id) throw new ApiError(400, 'id is required');
+    if (typeof fv.basePrompt !== 'string') throw new ApiError(400, 'basePrompt must be a string');
+    const basePrompt = fv.basePrompt.trim();
+    if (basePrompt.length > 20_000) throw new ApiError(400, 'basePrompt is too long');
+    const access = await saveAccessConfig(state, (current) => {
+      const map = { ...(current.chatBasePrompts ?? {}) };
+      if (basePrompt) map[id] = basePrompt;
+      else delete map[id];
+      return { ...current, chatBasePrompts: map };
+    });
+    return accessView(access);
+  }
 
   if (action !== 'add' && action !== 'remove') {
-    throw new ApiError(400, 'action must be add|remove|set-mention|set-resource');
+    throw new ApiError(400, 'action must be add|remove|set-mention|set-resource|set-base-prompt');
   }
   if (kind !== 'user' && kind !== 'admin' && kind !== 'chat') {
     throw new ApiError(400, 'kind must be user|admin|chat');
@@ -425,6 +441,11 @@ export async function mutateAccess(
     }
     if (action === 'remove' && kind === 'chat') {
       next.resourceGroupChats = next.resourceGroupChats.filter((chatId) => chatId !== id);
+      if (next.chatBasePrompts?.[id] !== undefined) {
+        const map = { ...next.chatBasePrompts };
+        delete map[id];
+        next.chatBasePrompts = map;
+      }
     }
     return next;
   });
@@ -438,6 +459,7 @@ function accessView(access: ProfileAccess): ConfigView['access'] {
     admins: access.admins,
     resourceGroupChats: access.resourceGroupChats,
     chatRequireMention: access.chatRequireMention ?? {},
+    chatBasePrompts: access.chatBasePrompts ?? {},
   };
 }
 

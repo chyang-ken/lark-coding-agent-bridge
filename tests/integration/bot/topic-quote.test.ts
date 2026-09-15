@@ -488,6 +488,7 @@ describe('resource group routing', () => {
     const h = await createHarness({
       chatMode: 'group',
       resourceGroup: true,
+      chatBasePrompt: '即使只有链接，也完整读取当前资源。',
       rawThreadIds: { om_sent_1: 'omt_resource' },
       chatMessages: parentMessages,
       threadMessages: [
@@ -540,6 +541,7 @@ describe('resource group routing', () => {
     expect(h.channel.addReaction).not.toHaveBeenCalledWith('om_resource_root', 'Typing');
     const prompt = h.agent.runOptions[0]?.prompt ?? '';
     expect(prompt).toContain('"threadId":"omt_resource"');
+    expect(readPromptSection(prompt, 'chat_base_prompt')).toBe('即使只有链接，也完整读取当前资源。');
     expect(prompt).toContain('local human context');
     expect(prompt).not.toContain('<chat_context>');
     expect(prompt).not.toContain('parent context');
@@ -745,6 +747,7 @@ async function createHarness(options: {
   chatMessages?: Array<Record<string, unknown>>;
   threadMessages?: Array<Record<string, unknown>>;
   resourceGroup?: boolean;
+  chatBasePrompt?: string;
   agentEvents?: AgentEvent[];
 } = {}):Promise<{
   tmp: TmpProfile;
@@ -770,6 +773,9 @@ async function createHarness(options: {
       allowedChats: ['oc_topic_chat'],
       allowedUsers: ['ou_user'],
       ...(options.resourceGroup ? { resourceGroupChats: ['oc_topic_chat'] } : {}),
+      ...(options.chatBasePrompt
+        ? { chatBasePrompts: { oc_topic_chat: options.chatBasePrompt } }
+        : {}),
     },
   });
   const profileConfig = {
@@ -826,6 +832,7 @@ function createFakeLarkChannel(options: {
   chatMessages?: Array<Record<string, unknown>>;
   threadMessages?: Array<Record<string, unknown>>;
   resourceGroup?: boolean;
+  chatBasePrompt?: string;
 } = {}):FakeLarkChannel & { handlers: MessageHandlerMap } {
   const handlers: MessageHandlerMap = {};
   const sent: Array<{ chatId: string; content: unknown; options: unknown }> = [];

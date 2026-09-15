@@ -152,6 +152,25 @@ describe('profile schema', () => {
     });
   });
 
+  it('normalizes per-chat base prompts without affecting other chats', () => {
+    const cfg = normalizeProfileConfig({
+      schemaVersion: 2,
+      agentKind: 'claude',
+      accounts: { app },
+      access: {
+        chatBasePrompts: {
+          oc_resource: '  只处理当前资源  ',
+          oc_empty: '   ',
+          oc_invalid: 42,
+        },
+      },
+    });
+
+    expect(cfg.access.chatBasePrompts).toEqual({
+      oc_resource: '只处理当前资源',
+    });
+  });
+
   it('normalizes workspaces to a default working directory only', () => {
     const cfg = createDefaultProfileConfig({
       agentKind: 'claude',

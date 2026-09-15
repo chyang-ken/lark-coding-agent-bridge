@@ -132,7 +132,19 @@ export function ConfigView({ profile }: { profile: string }) {
       toast.error(String((e as Error).message ?? e));
     }
   }
-
+  async function setBasePrompt(id: string, basePrompt: string) {
+    try {
+      const acc = await apiPost<ConfigData["access"]>(
+        `/api/access?profile=${encodeURIComponent(profile)}`,
+        { action: "set-base-prompt", kind: "chat", id, basePrompt },
+      );
+      setCfg((c) => (c ? { ...c, access: acc } : c));
+      toast.success("群 Base Prompt 已保存");
+    } catch (e) {
+      toast.error(String((e as Error).message ?? e));
+      throw e;
+    }
+  }
 
   return (
     <div className="space-y-4">
@@ -218,6 +230,7 @@ export function ConfigView({ profile }: { profile: string }) {
             ids={cfg.access.allowedChats}
             chatRequireMention={cfg.access.chatRequireMention}
             resourceGroupChats={cfg.access.resourceGroupChats}
+            chatBasePrompts={cfg.access.chatBasePrompts}
             chatNames={chatNames}
             globalRequire={cfg.requireMentionInGroup}
             onAdd={(id, name) => {
@@ -227,6 +240,7 @@ export function ConfigView({ profile }: { profile: string }) {
             onRemove={(id) => access("remove", "chat", id)}
             onSetMention={setMention}
             onSetResourceGroup={setResourceGroup}
+            onSetBasePrompt={setBasePrompt}
           />
           <Separator />
           <AccessList label="管理员（open_id）" placeholder="ou_..." ids={cfg.access.admins}
@@ -577,23 +591,27 @@ function AllowedChats({
   ids,
   chatRequireMention,
   resourceGroupChats,
+  chatBasePrompts,
   chatNames,
   globalRequire,
   onAdd,
   onRemove,
   onSetMention,
   onSetResourceGroup,
+  onSetBasePrompt,
 }: {
   profile: string;
   ids: string[];
   chatRequireMention: Record<string, boolean>;
   resourceGroupChats: string[];
+  chatBasePrompts: Record<string, string>;
   chatNames: Record<string, string>;
   globalRequire: boolean;
   onAdd: (id: string, name?: string) => void;
   onRemove: (id: string) => void;
   onSetMention: (id: string, requireMention: boolean | null) => void;
   onSetResourceGroup: (id: string, enabled: boolean) => void;
+  onSetBasePrompt: (id: string, basePrompt: string) => Promise<void>;
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [draft, setDraft] = useState("");
@@ -608,31 +626,37 @@ function AllowedChats({
           const value = override === undefined ? "global" : override ? "on" : "off";
           const resourceGroup = resourceGroupChats.includes(id);
           return (
-            <div key={id} className="flex items-center gap-2 px-3 py-2">
-              <div className="min-w-0 flex-1">
-                {chatNames[id] && <div className="truncate text-sm">{chatNames[id]}</div>}
-                <div className="truncate font-mono text-xs text-muted-foreground">{id}</div>
+            <div key={id} className="space-y-2 px-3 py-2">
+              <div className="flex items-center gap-2">
+                <div className="min-w-0 flex-1">
+                  {chatNames[id] && <div className="truncate text-sm">{chatNames[id]}</div>}
+                  <div className="truncate font-mono text-xs text-muted-foreground">{id}</div>
+                </div>
+                <Select
+                  disabled={resourceGroup}
+                  value={value}
+                  onValueChange={(v) => onSetMention(id, v === "global" ? null : v === "on")}
+                >
+                  <SelectTrigger className="h-8 w-[150px]"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="global">@：跟随全局（{globalRequire ? "需@" : "无需@"}）</SelectItem>
+                    <SelectItem value="on">需要 @</SelectItem>
+                    <SelectItem value="off">无需 @</SelectItem>
+                  </SelectContent>
+                </Select>
+                <div className="flex items-center gap-2 whitespace-nowrap">
+                  <Label className="text-xs">资源群</Label>
+                  <Switch
+                    checked={resourceGroup}
+                    onCheckedChange={(enabled) => onSetResourceGroup(id, enabled)}
+                  />
+                </div>
+                <Button variant="ghost" size="sm" onClick={() => onRemove(id)}>移除</Button>
               </div>
-              <Select
-                disabled={resourceGroup}
-                value={value}
-                onValueChange={(v) => onSetMention(id, v === "global" ? null : v === "on")}
-              >
-                <SelectTrigger className="h-8 w-[150px]"><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="global">@：跟随全局（{globalRequire ? "需@" : "无需@"}）</SelectItem>
-                  <SelectItem value="on">需要 @</SelectItem>
-                  <SelectItem value="off">无需 @</SelectItem>
-                </SelectContent>
-              </Select>
-              <div className="flex items-center gap-2 whitespace-nowrap">
-                <Label className="text-xs">资源群</Label>
-                <Switch
-                  checked={resourceGroup}
-                  onCheckedChange={(enabled) => onSetResourceGroup(id, enabled)}
-                />
-              </div>
-              <Button variant="ghost" size="sm" onClick={() => onRemove(id)}>移除</Button>
+              <ChatBasePromptEditor
+                value={chatBasePrompts[id] ?? ""}
+                onSave={(basePrompt) => onSetBasePrompt(id, basePrompt)}
+              />
             </div>
           );
         })}
@@ -652,6 +676,46 @@ function AllowedChats({
         added={ids}
         onPick={onAdd}
       />
+    </div>
+  );
+}
+
+function ChatBasePromptEditor({ value, onSave }: {
+  value: string;
+  onSave: (value: string) => Promise<void>;
+}) {
+  const [draft, setDraft] = useState(value);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => setDraft(value), [value]);
+  const changed = draft.trim() !== value;
+
+  return (
+    <div className="space-y-1">
+      <Label className="text-xs">群 Base Prompt（只影响这个群）</Label>
+      <div className="flex items-end gap-2">
+        <textarea
+          className="min-h-20 flex-1 resize-y rounded-md border bg-background px-3 py-2 text-sm"
+          maxLength={20_000}
+          placeholder="例如：即使消息只有链接，也先完整读取正文、图片或视频，再总结价值和下一步。"
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+        />
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={!changed || saving}
+          onClick={async () => {
+            setSaving(true);
+            try {
+              await onSave(draft.trim());
+            } finally {
+              setSaving(false);
+            }
+          }}
+        >
+          {saving ? "保存中…" : "保存"}
+        </Button>
+      </div>
     </div>
   );
 }

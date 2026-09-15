@@ -1046,6 +1046,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           '之前的对话里可能提到别的模型,请以当前模型为准;若被问到你用的是什么模型,据此回答。',
       ]
     : undefined;
+  const chatBasePrompt = controls.profileConfig.access.chatBasePrompts?.[chatId];
 
   const prompt = buildPrompt(
     batch,
@@ -1060,6 +1061,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     },
     channel.botIdentity,
     extraInstructions,
+    chatBasePrompt,
   );
   log.info('prompt', 'built', {
     promptChars: prompt.length,
@@ -1958,6 +1960,7 @@ function buildPrompt(
   } = { chat: false, topic: false, maxMessagesPerLayer: 40 },
   botIdentity?: { openId: string; name?: string },
   extraInstructions?: string[],
+  chatBasePrompt?: string,
 ): string {
   const first = batch[0];
   if (!first) return '';
@@ -2009,6 +2012,7 @@ function buildPrompt(
       source: 'im',
     },
     ...(instructions.length > 0 ? { instructions } : {}),
+    ...(chatBasePrompt ? { chatBasePrompt } : {}),
     userInput: userPart,
     ...(topicContext.length > 0 ? { topicContext: topicContext.map(toPromptTopicMessage) } : {}),
     ...(chatContext.length > 0 ? { chatContext: chatContext.map(toPromptChatMessage) } : {}),
