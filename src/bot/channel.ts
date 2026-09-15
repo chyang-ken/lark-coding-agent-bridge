@@ -997,12 +997,14 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   if (mode === 'topic' && threadId) {
     const resourceGroup = controls.profileConfig.access.resourceGroupChats.includes(chatId);
     const [chatUpdates, topicUpdates] = await Promise.all([
-      fetchChatContext(channel, chatId, {
-        maxMessages: maxContextMessages,
-        excludeIds: contextExcludeIds,
-        seenIds: sessions.seenContextMessageIds(scope, 'chat'),
-        humanOnly: true,
-      }),
+      resourceGroup
+        ? Promise.resolve({ messages: [] as QuotedContext[], truncated: false })
+        : fetchChatContext(channel, chatId, {
+            maxMessages: maxContextMessages,
+            excludeIds: contextExcludeIds,
+            seenIds: sessions.seenContextMessageIds(scope, 'chat'),
+            humanOnly: true,
+          }),
       fetchTopicContextUpdates(channel, threadId, {
         maxMessages: maxContextMessages,
         excludeIds: contextExcludeIds,

@@ -456,7 +456,7 @@ describe('topic message quote handling', () => {
 
 
 describe('resource group routing', () => {
-  it('opens one isolated topic without @, injects capped human context, and keeps follow-ups in it', async () => {
+  it('opens one isolated topic without @, excludes parent-chat context, and keeps follow-ups in it', async () => {
     const parentMessages = [
       ...Array.from({ length: 41 }, (_, index) => ({
         message_id: 'om_parent_' + index,
@@ -541,18 +541,12 @@ describe('resource group routing', () => {
     const prompt = h.agent.runOptions[0]?.prompt ?? '';
     expect(prompt).toContain('"threadId":"omt_resource"');
     expect(prompt).toContain('local human context');
+    expect(prompt).not.toContain('<chat_context>');
+    expect(prompt).not.toContain('parent context');
     expect(prompt).not.toContain('Proma parent output');
     expect(prompt).not.toContain('Proma topic output');
     expect(prompt).not.toContain('sibling topic leak');
-    const chatContext = readPromptSection(prompt, 'chat_context') as Array<{ messageId: string }>;
-    expect(chatContext).toHaveLength(40);
-    expect(chatContext.some((item) => item.messageId === 'om_parent_0')).toBe(true);
-    expect(chatContext.some((item) => item.messageId === 'om_parent_40')).toBe(false);
-    expect(readPromptSection(prompt, 'context_limits')).toEqual({
-      chat: true,
-      topic: false,
-      maxMessagesPerLayer: 40,
-    });
+    expect(prompt).not.toContain('<context_limits>');
 
     await h.channel.handlers.message?.(
       message({
